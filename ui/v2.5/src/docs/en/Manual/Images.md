@@ -4,12 +4,17 @@ Images are the parts which make up galleries, but you can also have them be scan
 
 1. Group them in a folder together and activate the **Create galleries from folders containing images** option in the library section of your settings. The gallery will get the name of the folder.
 2. Group them in a folder together and create a file in the folder called .forcegallery. The gallery will get the name of the folder.
-3. Group them into a zip archive together. The gallery will get the name of the archive.
+3. Group them into a zip, 7z or rar archive together. The gallery will get the name of the archive.
 4. You can simply create a gallery in stash itself by clicking on **New** in the Galleries tab. 
 
 You can add images to every gallery manually in the gallery detail page. Deleting can be done by selecting the according images in the same view and clicking on the minus next to the edit button.
 
 For best results, images in zip file should be stored without compression (copy, store or no compression options depending on the software you use. Eg on linux: `zip -0 -r gallery.zip foldertozip/`). This impacts **heavily** on the zip read performance.
+
+7z and rar archives are also supported, with some limitations:
+
+- Solid archives are not supported, and their contents are skipped during scanning. Create them with solid mode disabled, for example `7z a -ms=off gallery.7z foldertozip/` or `rar a -s- gallery.rar foldertozip/`.
+- Encrypted archives are not supported.
 
 > **⚠️ Note:** AVIF files in ZIP archives are currently unsupported.
 
