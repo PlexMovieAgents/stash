@@ -422,6 +422,11 @@ func (j *ScanJob) scanZipFile(ctx context.Context, f file.ScannedFile, progress 
 			return nil
 		}
 
+		if errors.Is(err, file.ErrUnsupportedArchive) {
+			logger.Warnf("Skipping contents of %q: %v", f.Path, err)
+			return nil
+		}
+
 		return err
 	}
 
