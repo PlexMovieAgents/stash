@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"path/filepath"
 
+	"github.com/bodgit/sevenzip"
+	"github.com/nwaples/rardecode/v2"
 	"github.com/stashapp/stash/pkg/logger"
 	"github.com/stashapp/stash/pkg/models"
 	"github.com/xWTF/chardet"
@@ -20,17 +22,58 @@ import (
 var (
 	ErrNotReaderAt  = errors.New("invalid reader: does not implement io.ReaderAt")
 	errZipFSOpenZip = errors.New("cannot open zip file inside zip file")
+
+	// ErrUnsupportedArchive is returned when a gallery archive cannot be read.
+	// ErrSolidArchive and ErrEncryptedArchive wrap it.
+	ErrUnsupportedArchive = errors.New("unsupported archive")
+	ErrSolidArchive       = fmt.Errorf("%w: solid archives are not supported", ErrUnsupportedArchive)
+	ErrEncryptedArchive   = fmt.Errorf("%w: encrypted archives are not supported", ErrUnsupportedArchive)
 )
 
-// ZipFS is a file system backed by a zip file.
+type archiveFormat int
+
+const (
+	archiveZip archiveFormat = iota
+	archive7z
+	archiveRar
+)
+
+var archiveSignatures = []struct {
+	format archiveFormat
+	magic  []byte
+}{
+	{archive7z, []byte("7z\xbc\xaf\x27\x1c")},
+	{archiveRar, []byte("Rar!\x1a\x07\x00")},     // RAR 1.5-4.x
+	{archiveRar, []byte("Rar!\x1a\x07\x01\x00")}, // RAR 5.0
+}
+
+// detectArchiveFormat determines the archive format from its leading bytes,
+// regardless of the file extension. Zip is the default, since zip files may
+// have data prepended to them (e.g. self-extracting archives).
+func detectArchiveFormat(r io.ReaderAt) archiveFormat {
+	header := make([]byte, 8)
+	n, _ := r.ReadAt(header, 0)
+	header = header[:n]
+
+	for _, s := range archiveSignatures {
+		if bytes.HasPrefix(header, s.magic) {
+			return s.format
+		}
+	}
+
+	return archiveZip
+}
+
+// ZipFS is a file system backed by an archive file.
+// Despite the name, it supports zip, 7z and rar archives.
 type zipFS struct {
-	*zip.Reader
+	fsys          fs.FS
 	zipFileCloser io.Closer
 	zipPath       string
 }
 
-func newZipFS(fs models.FS, path string, size int64) (*zipFS, error) {
-	reader, err := fs.Open(path)
+func newZipFS(f models.FS, path string, size int64) (*zipFS, error) {
+	reader, err := f.Open(path)
 	if err != nil {
 		return nil, err
 	}
@@ -41,9 +84,39 @@ func newZipFS(fs models.FS, path string, size int64) (*zipFS, error) {
 		return nil, ErrNotReaderAt
 	}
 
-	zipReader, err := zip.NewReader(asReaderAt, size)
-	if err != nil {
+	var fsys fs.FS
+	var closer io.Closer = reader
+
+	switch detectArchiveFormat(asReaderAt) {
+	case archive7z:
+		fsys, err = open7zArchive(asReaderAt, size)
+	case archiveRar:
+		// rardecode opens the archive (and any further volumes) by name itself
 		reader.Close()
+		closer = io.NopCloser(nil)
+		fsys, err = openRarArchive(f, path)
+	default:
+		fsys, err = openZipArchive(asReaderAt, size, path)
+	}
+
+	if err != nil {
+		closer.Close()
+		return nil, err
+	}
+
+	return &zipFS{
+		fsys:          fsys,
+		zipFileCloser: closer,
+		zipPath:       path,
+	}, nil
+}
+
+func openZipArchive(r io.ReaderAt, size int64, path string) (fs.FS, error) {
+	zipReader, err := zip.NewReader(r, size)
+	if err != nil {
+		if errors.Is(err, zip.ErrFormat) {
+			return nil, fmt.Errorf("%w: %v", ErrUnsupportedArchive, err)
+		}
 		return nil, err
 	}
 
@@ -75,7 +148,6 @@ func newZipFS(fs models.FS, path string, size int64) (*zipFS, error) {
 			for _, f := range zipReader.File {
 				newName, _, err := transform.String(decoder, f.Name)
 				if err != nil {
-					reader.Close()
 					logger.Warnf("Failed to decode %v: %v", []byte(f.Name), err)
 				} else {
 					f.Name = newName
@@ -85,11 +157,64 @@ func newZipFS(fs models.FS, path string, size int64) (*zipFS, error) {
 		}
 	}
 
-	return &zipFS{
-		Reader:        zipReader,
-		zipFileCloser: reader,
-		zipPath:       path,
-	}, nil
+	return zipReader, nil
+}
+
+func open7zArchive(r io.ReaderAt, size int64) (fs.FS, error) {
+	reader, err := sevenzip.NewReader(r, size)
+	if err != nil {
+		var readErr *sevenzip.ReadError
+		if errors.As(err, &readErr) && readErr.Encrypted {
+			return nil, fmt.Errorf("%w: %v", ErrEncryptedArchive, err)
+		}
+		return nil, err
+	}
+
+	// files sharing a compressed stream are stored solid
+	streams := make(map[int]bool)
+	for _, f := range reader.File {
+		if f.FileInfo().IsDir() || f.UncompressedSize == 0 {
+			continue
+		}
+		if streams[f.Stream] {
+			return nil, ErrSolidArchive
+		}
+		streams[f.Stream] = true
+	}
+
+	return reader, nil
+}
+
+// rarFS adapts models.FS to the fs.FS used by rardecode to open archive volumes.
+type rarFS struct {
+	fs models.FS
+}
+
+func (f rarFS) Open(name string) (fs.File, error) {
+	return f.fs.Open(name)
+}
+
+func openRarArchive(f models.FS, path string) (fs.FS, error) {
+	opt := rardecode.FileSystem(rarFS{f})
+
+	files, err := rardecode.List(path, opt)
+	if err != nil {
+		if errors.Is(err, rardecode.ErrArchiveEncrypted) {
+			return nil, fmt.Errorf("%w: %v", ErrEncryptedArchive, err)
+		}
+		return nil, err
+	}
+
+	for _, f := range files {
+		if f.Encrypted {
+			return nil, ErrEncryptedArchive
+		}
+		if f.Solid {
+			return nil, ErrSolidArchive
+		}
+	}
+
+	return rardecode.OpenFS(path, opt)
 }
 
 func (f *zipFS) rel(name string) (string, error) {
@@ -152,7 +277,7 @@ func (f *zipFS) Open(name string) (fs.ReadDirFile, error) {
 		return nil, err
 	}
 
-	r, err := f.Reader.Open(relName)
+	r, err := f.fsys.Open(relName)
 	if err != nil {
 		return nil, err
 	}
