@@ -14,10 +14,12 @@ import (
 	"testing"
 )
 
-var testArchiveFiles = []struct {
+type testArchiveFile struct {
 	name    string
 	content string
-}{
+}
+
+var testArchiveFiles = []testArchiveFile{
 	{"gallery/1.jpg", "image one"},
 	{"gallery/sub/2.jpg", "image two!"},
 }
@@ -68,6 +70,11 @@ func rar5Block(body []byte) []byte {
 // See https://www.rarlab.com/technote.htm for the format.
 func writeTestRar5(t *testing.T, path string, solid bool) {
 	t.Helper()
+	writeTestRar5Files(t, path, testArchiveFiles, solid)
+}
+
+func writeTestRar5Files(t *testing.T, path string, files []testArchiveFile, solid bool) {
+	t.Helper()
 
 	const (
 		blockArc    = 1
@@ -91,7 +98,7 @@ func writeTestRar5(t *testing.T, path string, solid bool) {
 	main = appendVint(main, arcFlags)
 	out = append(out, rar5Block(main)...)
 
-	for i, f := range testArchiveFiles {
+	for i, f := range files {
 		var compFlags uint64 // method 0: store
 		if solid && i > 0 {
 			compFlags = compSolid
@@ -239,17 +246,12 @@ func TestZipFS_Unsupported(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	solidRarPath := filepath.Join(dir, "solid.rar")
-	writeTestRar5(t, solidRarPath, true)
-
 	tests := []struct {
 		name string
 		path string
 		want error
 	}{
 		{"unknown format", garbagePath, ErrUnsupportedArchive},
-		{"solid 7z", filepath.Join("testdata", "solid.7z"), ErrSolidArchive},
-		{"solid rar", solidRarPath, ErrSolidArchive},
 		{"encrypted 7z headers", filepath.Join("testdata", "encrypted.7z"), ErrEncryptedArchive},
 	}
 

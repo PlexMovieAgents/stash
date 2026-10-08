@@ -58,8 +58,10 @@ func (f *OsFS) Open(name string) (fs.ReadDirFile, error) {
 	return os.Open(name)
 }
 
+// OpenZip opens the archive at name. Recently used archives are kept open
+// and shared between callers.
 func (f *OsFS) OpenZip(name string, size int64) (models.ZipFS, error) {
-	return newZipFS(f, name, size)
+	return archiveHandles.open(f, name)
 }
 
 func (f *OsFS) IsPathCaseSensitive(path string) (bool, error) {
