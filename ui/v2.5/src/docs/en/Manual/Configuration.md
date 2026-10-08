@@ -179,6 +179,7 @@ These options are typically not exposed in the UI and must be changed manually i
 
 | Field | Remarks |
 |-------|---------|
+| `archive_cache_size_mb` | Maximum size in MB of the solid 7z and rar gallery archives extracted to the cache directory for viewing. Defaults to 2048. `0` disables the cache. |
 | `custom_served_folders` | A map of URLs to file system folders. See below. |
 | `custom_ui_location` | The file system folder where the UI files will be served from, instead of using the embedded UI. Empty to disable. Stash must be restarted to take effect. |
 | `developer_options.extra_blob_paths` | A list of alternative blob paths. These paths will be read for blob files. Blobs will not be written or deleted from these paths. Intended for developer use only. |

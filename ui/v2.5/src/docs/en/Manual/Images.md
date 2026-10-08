@@ -11,10 +11,9 @@ You can add images to every gallery manually in the gallery detail page. Deletin
 
 For best results, images in zip file should be stored without compression (copy, store or no compression options depending on the software you use. Eg on linux: `zip -0 -r gallery.zip foldertozip/`). This impacts **heavily** on the zip read performance.
 
-7z and rar archives are also supported, with some limitations:
+7z and rar archives are also supported. Encrypted archives are not supported.
 
-- Solid archives are not supported, and their contents are skipped during scanning. Create them with solid mode disabled, for example `7z a -ms=off gallery.7z foldertozip/` or `rar a -s- gallery.rar foldertozip/`.
-- Encrypted archives are not supported.
+Solid 7z and rar archives (the default for 7-Zip) compress files together, so an image can only be read after decompressing the images before it. Scanning reads them in order, so this costs little. To view images out of order, stash extracts the solid parts of the archive to the `archives` folder of the cache directory. The cache is limited to 2GB by default, removing the least recently used archives first, and can be changed with the `archive_cache_size_mb` setting in `config.yml` (`0` disables it). Without a cache directory, or for archives larger than the cache, viewing an image decompresses the archive up to that image each time, which can be slow. For the best performance, create archives with solid mode disabled and no compression, for example `7z a -ms=off -mx=0 gallery.7z foldertozip/` or `rar a -s- -m0 gallery.rar foldertozip/`.
 
 > **⚠️ Note:** AVIF files in ZIP archives are currently unsupported.
 

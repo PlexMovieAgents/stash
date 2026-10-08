@@ -17,6 +17,7 @@ import (
 	"github.com/stashapp/stash/internal/log"
 	"github.com/stashapp/stash/internal/manager/config"
 	"github.com/stashapp/stash/pkg/ffmpeg"
+	"github.com/stashapp/stash/pkg/file"
 	"github.com/stashapp/stash/pkg/fsutil"
 	"github.com/stashapp/stash/pkg/job"
 	"github.com/stashapp/stash/pkg/logger"
@@ -118,6 +119,12 @@ func (s *Manager) RefreshConfig() {
 
 		s.ImageThumbnailGenerateWaitGroup.Size = cfg.GetParallelTasksWithAutoDetection()
 	}
+
+	archiveCacheDir := ""
+	if cachePath := cfg.GetCachePath(); cachePath != "" {
+		archiveCacheDir = filepath.Join(cachePath, "archives")
+	}
+	file.SetArchiveDiskCache(archiveCacheDir, cfg.GetArchiveCacheSize())
 }
 
 // RefreshPluginCache refreshes the plugin cache.

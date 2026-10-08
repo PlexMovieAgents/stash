@@ -218,6 +218,9 @@ func (d *Deleter) Commit() {
 }
 
 func (d *Deleter) renameForDelete(path string, bypassTrash bool) error {
+	// open archives cannot be renamed on Windows
+	EvictArchives(path)
+
 	if d.TrashPath != "" && !bypassTrash {
 		// Move file to trash immediately
 		trashDest, err := fsutil.MoveToTrash(path, d.TrashPath)

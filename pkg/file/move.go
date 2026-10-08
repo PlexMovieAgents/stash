@@ -143,6 +143,9 @@ func (m *Mover) CreateFolderHierarchy(path string) error {
 }
 
 func (m *Mover) moveFile(oldPath, newPath string) error {
+	// open archives cannot be renamed on Windows
+	EvictArchives(oldPath)
+
 	if err := m.Renamer.Rename(oldPath, newPath); err != nil {
 		return fmt.Errorf("renaming file %s to %s: %w", oldPath, newPath, err)
 	}

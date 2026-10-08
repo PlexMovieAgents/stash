@@ -91,6 +91,11 @@ const (
 	ParallelTasks        = "parallel_tasks"
 	parallelTasksDefault = 1
 
+	// ArchiveCacheSize is the maximum size in MiB of the solid blocks of 7z
+	// and rar gallery archives extracted to the cache directory.
+	ArchiveCacheSize        = "archive_cache_size_mb"
+	archiveCacheSizeDefault = 2048
+
 	UseCustomSpriteInterval        = "use_custom_sprite_interval"
 	UseCustomSpriteIntervalDefault = false
 
@@ -740,6 +745,12 @@ func (i *Config) GetStashPaths() StashConfigs {
 
 func (i *Config) GetCachePath() string {
 	return i.getString(Cache)
+}
+
+// GetArchiveCacheSize returns the maximum size in bytes of the gallery
+// archive cache. Zero or less disables it.
+func (i *Config) GetArchiveCacheSize() int64 {
+	return int64(i.getInt(ArchiveCacheSize)) << 20
 }
 
 func (i *Config) GetGeneratedPath() string {
@@ -1972,6 +1983,7 @@ func (i *Config) setDefaultValues() {
 	i.setDefault(Port, portDefault)
 
 	i.setDefault(ParallelTasks, parallelTasksDefault)
+	i.setDefault(ArchiveCacheSize, archiveCacheSizeDefault)
 	i.setDefault(SequentialScanning, SequentialScanningDefault)
 	i.setDefault(PreviewSegmentDuration, previewSegmentDurationDefault)
 	i.setDefault(PreviewSegments, previewSegmentsDefault)
