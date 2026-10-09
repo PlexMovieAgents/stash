@@ -4,6 +4,9 @@
 # plus the patches. Each run moves both to the newest upstream base and pushes
 # an image to ghcr.io/<owner>/stash.
 #
+# Failures open an issue labelled custom-image, which the next successful run
+# closes.
+#
 # Requires a SYNC_TOKEN secret: a fine-grained token for this repository with
 # contents and workflows write permission, since upstream commits change
 # workflow files, which GITHUB_TOKEN cannot push.
@@ -24,6 +27,7 @@ concurrency:
 permissions:
   contents: read
   packages: write
+  issues: write
 
 env:
   UPSTREAM_REPO: stashapp/stash
@@ -159,24 +163,56 @@ jobs:
           lease=$(git rev-parse -q --verify origin/upstream || true)
           git push --force-with-lease=upstream:"$lease" origin "$TARGET:refs/heads/upstream"
 
-      - name: Report conflicts
-        if: failure() && steps.rebase.outcome == 'failure'
+      - name: Report failure
+        if: failure()
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REBASE_FAILED: ${{ steps.rebase.outcome == 'failure' }}
           TARGET: ${{ steps.base.outputs.target }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          report="$RUNNER_TEMP/report.md"
           {
-            echo "## Rebasing the patches onto upstream failed"
+            if [ "$REBASE_FAILED" = true ]; then
+              echo "Rebasing the patches onto upstream \`${TARGET::12}\` failed."
+              echo
+              cat "$RUNNER_TEMP/conflicts.md" 2>/dev/null || echo "See the log of the rebase step."
+              echo
+              echo "Resolve the conflicts locally, then push the custom branch. The next run builds it."
+              echo
+              echo '```sh'
+              echo "git fetch origin"
+              echo "git fetch https://github.com/$UPSTREAM_REPO.git develop '+refs/tags/v*:refs/tags/v*'"
+              echo "git switch custom && git reset --hard origin/custom"
+              echo "git rebase --onto $TARGET origin/upstream"
+              echo "# resolve the conflicts, git add, git rebase --continue"
+              echo "git push --force-with-lease origin custom"
+              echo '```'
+            else
+              echo "Building the custom image failed. See the run log."
+            fi
             echo
-            cat "$RUNNER_TEMP/conflicts.md" 2>/dev/null || echo "See the log of the rebase step."
-            echo
-            echo "Resolve the conflicts locally, then push the custom branch. The next run builds it."
-            echo
-            echo '```sh'
-            echo "git fetch origin"
-            echo "git fetch https://github.com/$UPSTREAM_REPO.git develop '+refs/tags/v*:refs/tags/v*'"
-            echo "git switch custom && git reset --hard origin/custom"
-            echo "git rebase --onto $TARGET origin/upstream"
-            echo "# resolve the conflicts, git add, git rebase --continue"
-            echo "git push --force-with-lease origin custom"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo "Run: $RUN_URL"
+          } > "$report"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+          # one open issue at a time, commented on by later failures
+          gh label create custom-image --color d73a4a --description "Custom image build failures" --force
+          issue=$(gh issue list --label custom-image --state open --json number --jq '.[0].number // empty')
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body-file "$report"
+          else
+            gh issue create --title "Custom image build failed" --label custom-image --body-file "$report"
+          fi
+
+      - name: Close failure issues
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          for issue in $(gh issue list --label custom-image --state open --json number --jq '.[].number'); do
+            gh issue close "$issue" --comment "Fixed by $RUN_URL"
+          done
