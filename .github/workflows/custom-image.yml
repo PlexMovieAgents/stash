@@ -1,0 +1,182 @@
+# Builds the custom image: upstream stash with the patches on the custom branch.
+#
+# The custom branch is the upstream commit recorded by the upstream branch,
+# plus the patches. Each run moves both to the newest upstream base and pushes
+# an image to ghcr.io/<owner>/stash.
+#
+# Requires a SYNC_TOKEN secret: a fine-grained token for this repository with
+# contents and workflows write permission, since upstream commits change
+# workflow files, which GITHUB_TOKEN cannot push.
+
+name: Custom image
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+  push:
+    branches:
+      - custom
+
+concurrency:
+  group: custom-image
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  UPSTREAM_REPO: stashapp/stash
+  # build upstream develop until a release newer than this is published,
+  # then build releases only
+  FOLLOW_DEVELOP_UNTIL_AFTER: v0.31.1
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: custom
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Choose upstream base
+        id: base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --no-tags "https://github.com/$UPSTREAM_REPO.git" \
+            +refs/heads/develop:refs/remotes/upstream/develop \
+            '+refs/tags/v*:refs/tags/v*'
+
+          release=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)
+          newest=$(printf '%s\n' "$FOLLOW_DEVELOP_UNTIL_AFTER" "$release" | sort -V | tail -n1)
+          if [ "$release" != "$FOLLOW_DEVELOP_UNTIL_AFTER" ] && [ "$newest" = "$release" ]; then
+            target=$(git rev-parse "refs/tags/$release^{commit}")
+            echo "Following release $release"
+          else
+            target=$(git rev-parse upstream/develop)
+            echo "Following develop: $(git log -1 --format='%h %s' "$target")"
+          fi
+
+          # the upstream branch records the base of the patches. If it is
+          # missing, assume the patches are based on develop.
+          current=$(git rev-parse -q --verify origin/upstream || git merge-base HEAD upstream/develop)
+
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          if [ "$target" != "$current" ] && ! git merge-base --is-ancestor "$target" HEAD; then
+            echo "rebase=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase onto upstream
+        id: rebase
+        if: steps.base.outputs.rebase == 'true'
+        env:
+          CONFLICTS_FILE: ${{ runner.temp }}/conflicts.md
+          CURRENT: ${{ steps.base.outputs.current }}
+          TARGET: ${{ steps.base.outputs.target }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # the script is part of the branch being rebased, so run a copy
+          cp .github/scripts/rebase-custom.sh "$RUNNER_TEMP/"
+          "$RUNNER_TEMP/rebase-custom.sh" "$CURRENT" "$TARGET"
+
+      - name: Image metadata
+        id: meta
+        env:
+          TARGET: ${{ steps.base.outputs.target }}
+        run: |
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/stash" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$(git describe --tags --exclude latest_develop "$TARGET")-custom" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Check for existing image
+        id: exists
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.sha }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1; then
+            echo "$IMAGE already exists"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test
+        if: steps.exists.outputs.exists != 'true'
+        run: go test -race ./pkg/file/...
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.exists.outputs.exists != 'true'
+
+      - name: Build and push image
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          # the working tree, not the commit that triggered the run
+          context: .
+          file: docker/build/x86_64/Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            GITHASH=${{ steps.meta.outputs.sha }}
+            STASH_VERSION=${{ steps.meta.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:custom
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+            ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # push only once the image is built, so that the branches never move to
+      # a base that fails to build
+      - name: Push branches
+        if: steps.base.outputs.target != steps.base.outputs.current
+        env:
+          CURRENT: ${{ steps.base.outputs.current }}
+          TARGET: ${{ steps.base.outputs.target }}
+          REBASED: ${{ steps.rebase.outcome == 'success' }}
+        run: |
+          if [ "$REBASED" = true ]; then
+            git push --force-with-lease=custom:"$(git rev-parse origin/custom)" origin HEAD:refs/heads/custom
+          fi
+          lease=$(git rev-parse -q --verify origin/upstream || true)
+          git push --force-with-lease=upstream:"$lease" origin "$TARGET:refs/heads/upstream"
+
+      - name: Report conflicts
+        if: failure() && steps.rebase.outcome == 'failure'
+        env:
+          TARGET: ${{ steps.base.outputs.target }}
+        run: |
+          {
+            echo "## Rebasing the patches onto upstream failed"
+            echo
+            cat "$RUNNER_TEMP/conflicts.md" 2>/dev/null || echo "See the log of the rebase step."
+            echo
+            echo "Resolve the conflicts locally, then push the custom branch. The next run builds it."
+            echo
+            echo '```sh'
+            echo "git fetch origin"
+            echo "git fetch https://github.com/$UPSTREAM_REPO.git develop '+refs/tags/v*:refs/tags/v*'"
+            echo "git switch custom && git reset --hard origin/custom"
+            echo "git rebase --onto $TARGET origin/upstream"
+            echo "# resolve the conflicts, git add, git rebase --continue"
+            echo "git push --force-with-lease origin custom"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
