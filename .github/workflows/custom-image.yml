@@ -1,8 +1,10 @@
-# Builds the custom image: upstream stash with the patches on the custom branch.
+# Builds the custom images: upstream stash with the patches on the custom
+# branch, as ghcr.io/<owner>/stash:custom, and in the hotio/stash image
+# (HOTIO_IMAGE) in place of its own stash, as ghcr.io/<owner>/stash:hotio.
 #
 # The custom branch is the upstream commit recorded by the upstream branch,
 # plus the patches. Each run moves both to the newest upstream base and pushes
-# an image to ghcr.io/<owner>/stash.
+# the images that are not built yet, :hotio also when only HOTIO_IMAGE changed.
 #
 # Failures open an issue labelled custom-image, which the next successful run
 # closes.
@@ -34,6 +36,7 @@ env:
   # build upstream develop until a release newer than this is published,
   # then build releases only
   FOLLOW_DEVELOP_UNTIL_AFTER: v0.31.1
+  HOTIO_IMAGE: ghcr.io/hotio/stash:release
 
 jobs:
   build:
@@ -98,9 +101,21 @@ jobs:
           TARGET: ${{ steps.base.outputs.target }}
         run: |
           echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/stash" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+          sha=$(git rev-parse --short=12 HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "version=$(git describe --tags --exclude latest_develop "$TARGET")-custom" >> "$GITHUB_OUTPUT"
+          describe=$(git describe --tags --exclude latest_develop "$TARGET")
+          echo "version=$describe-custom" >> "$GITHUB_OUTPUT"
+          echo "hotio_version=$describe-hotio" >> "$GITHUB_OUTPUT"
+          # pin the hotio image for this build
+          hotio=$(docker buildx imagetools inspect "$HOTIO_IMAGE" --format '{{json .Manifest}}' | jq -r .digest)
+          if [[ "$hotio" != sha256:* ]]; then
+            echo "cannot find the digest of $HOTIO_IMAGE" >&2
+            exit 1
+          fi
+          echo "hotio=$HOTIO_IMAGE@$hotio" >> "$GITHUB_OUTPUT"
+          # a build of these patches on this hotio image
+          echo "hotio_build=sha-$sha-hotio-${hotio:7:12}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/login-action@v3
         with:
@@ -108,25 +123,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Check for existing image
+      - name: Check for existing images
         id: exists
         env:
-          IMAGE: ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.sha }}
+          CUSTOM: ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.sha }}
+          HOTIO: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.hotio_build }}
         run: |
-          if docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1; then
-            echo "$IMAGE already exists"
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          fi
+          check() {
+            if docker buildx imagetools inspect "$2" > /dev/null 2>&1; then
+              echo "$2 already exists"
+              echo "$1=true" >> "$GITHUB_OUTPUT"
+            fi
+          }
+          check custom "$CUSTOM"
+          check hotio "$HOTIO"
 
       - name: Test
-        if: steps.exists.outputs.exists != 'true'
+        if: steps.exists.outputs.custom != 'true' || steps.exists.outputs.hotio != 'true'
         run: go test -race ./pkg/file/...
 
       - uses: docker/setup-buildx-action@v3
-        if: steps.exists.outputs.exists != 'true'
+        if: steps.exists.outputs.custom != 'true' || steps.exists.outputs.hotio != 'true'
 
       - name: Build and push image
-        if: steps.exists.outputs.exists != 'true'
+        if: steps.exists.outputs.custom != 'true'
         uses: docker/build-push-action@v6
         with:
           # the working tree, not the commit that triggered the run
@@ -148,8 +168,62 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # push only once the image is built, so that the branches never move to
-      # a base that fails to build
+      - name: Write hotio Dockerfile
+        if: steps.exists.outputs.hotio != 'true'
+        env:
+          HOTIO: ${{ steps.meta.outputs.hotio }}
+        run: .github/scripts/hotio-dockerfile.sh "$HOTIO" > "$RUNNER_TEMP/hotio.Dockerfile"
+
+      - name: Build hotio image
+        if: steps.exists.outputs.hotio != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ runner.temp }}/hotio.Dockerfile
+          platforms: linux/amd64
+          load: true
+          build-args: |
+            GITHASH=${{ steps.meta.outputs.sha }}
+            STASH_VERSION=${{ steps.meta.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.hotio_version }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}
+            org.opencontainers.image.base.name=${{ steps.meta.outputs.hotio }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:hotio
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.hotio_version }}
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.hotio_build }}
+          # the stages before the last are the same as those of the custom image
+          cache-from: |
+            type=gha
+            type=gha,scope=hotio
+          cache-to: type=gha,scope=hotio,mode=max
+
+      # the static build must run in the hotio image, which is not Alpine
+      - name: Check that stash runs in the hotio image
+        if: steps.exists.outputs.hotio != 'true'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.hotio_build }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          version=$(docker run --rm --entrypoint /app/stash "$IMAGE" --version)
+          echo "$version"
+          grep -qF "$VERSION" <<< "$version"
+
+      - name: Push hotio image
+        if: steps.exists.outputs.hotio != 'true'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          VERSION: ${{ steps.meta.outputs.hotio_version }}
+          BUILD: ${{ steps.meta.outputs.hotio_build }}
+        run: |
+          for tag in "$BUILD" "$VERSION" hotio; do
+            docker push "$IMAGE:$tag"
+          done
+
+      # push only once the images are built, so that the branches never move
+      # to a base that fails to build
       - name: Push branches
         if: steps.base.outputs.target != steps.base.outputs.current
         env:
