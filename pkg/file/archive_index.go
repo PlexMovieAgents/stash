@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// archiveEntry is a file or directory in a 7z or rar archive.
+// archiveEntry is a file or directory in a 7z or rar archive or an ISO image.
 type archiveEntry struct {
 	name    string // slash-separated path relative to the archive root
 	size    int64
@@ -23,6 +23,11 @@ type archiveEntry struct {
 
 	// open opens a file that is not stored in a solid block
 	open func() (io.ReadCloser, error)
+
+	// data holds a file stored uncompressed in one piece from offset, as in
+	// an ISO image; nil for other files
+	data   io.ReaderAt
+	offset int64
 
 	// block is the solid block holding the file, or nil
 	block *solidBlock
@@ -42,7 +47,7 @@ func (e *archiveEntry) ModTime() time.Time { return e.modTime }
 func (e *archiveEntry) IsDir() bool        { return e.isDir }
 func (e *archiveEntry) Sys() any           { return nil }
 
-// archiveIndex is the directory tree of a 7z or rar archive, built from its
+// archiveIndex is the directory tree of an archive, built from its
 // headers so that listing and stat calls do not need to decompress anything.
 type archiveIndex struct {
 	entries map[string]*archiveEntry
@@ -125,7 +130,7 @@ func (x *archiveIndex) dir(name string) *archiveEntry {
 	return e
 }
 
-// archiveFS is the fs.FS of a 7z or rar archive.
+// archiveFS is the fs.FS of a 7z or rar archive or an ISO image.
 type archiveFS struct {
 	index *archiveIndex
 	solid *solidReader // nil if the archive has no solid blocks
@@ -154,6 +159,10 @@ func (a *archiveFS) Open(name string) (fs.File, error) {
 
 	if e.isDir {
 		return &archiveDirFile{entry: e}, nil
+	}
+
+	if e.data != nil {
+		return &archiveSectionFile{SectionReader: io.NewSectionReader(e.data, e.offset, e.size), entry: e}, nil
 	}
 
 	if e.block != nil {
@@ -239,5 +248,18 @@ func (f *archiveMemFile) Stat() (fs.FileInfo, error) { return f.entry, nil }
 func (f *archiveMemFile) Close() error               { return nil }
 
 func (f *archiveMemFile) ReadDir(int) ([]fs.DirEntry, error) {
+	return nil, &fs.PathError{Op: "readdir", Path: f.entry.name, Err: errNotDir}
+}
+
+// archiveSectionFile is a file in an archiveFS read directly from the archive.
+type archiveSectionFile struct {
+	*io.SectionReader
+	entry *archiveEntry
+}
+
+func (f *archiveSectionFile) Stat() (fs.FileInfo, error) { return f.entry, nil }
+func (f *archiveSectionFile) Close() error               { return nil }
+
+func (f *archiveSectionFile) ReadDir(int) ([]fs.DirEntry, error) {
 	return nil, &fs.PathError{Op: "readdir", Path: f.entry.name, Err: errNotDir}
 }

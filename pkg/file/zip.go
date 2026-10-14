@@ -37,6 +37,7 @@ const (
 	archiveZip archiveFormat = iota
 	archive7z
 	archiveRar
+	archiveISO
 )
 
 var archiveSignatures = []struct {
@@ -49,8 +50,9 @@ var archiveSignatures = []struct {
 }
 
 // detectArchiveFormat determines the archive format from its leading bytes,
-// regardless of the file extension. Zip is the default, since zip files may
-// have data prepended to them (e.g. self-extracting archives).
+// or for ISO images from their first volume descriptor, regardless of the file
+// extension. Zip is the default, since zip files may have data prepended to
+// them (e.g. self-extracting archives).
 func detectArchiveFormat(r io.ReaderAt) archiveFormat {
 	header := make([]byte, 8)
 	n, _ := r.ReadAt(header, 0)
@@ -62,11 +64,15 @@ func detectArchiveFormat(r io.ReaderAt) archiveFormat {
 		}
 	}
 
+	if !bytes.HasPrefix(header, []byte("PK")) && isISOImage(r) {
+		return archiveISO
+	}
+
 	return archiveZip
 }
 
 // ZipFS is a file system backed by an archive file.
-// Despite the name, it supports zip, 7z and rar archives.
+// Despite the name, it supports zip, 7z and rar archives and ISO images.
 type zipFS struct {
 	fsys          fs.FS
 	zipFileCloser io.Closer
@@ -96,6 +102,8 @@ func newZipFS(f models.FS, path string, size int64) (*zipFS, error) {
 		reader.Close()
 		closer = io.NopCloser(nil)
 		fsys, err = openRarArchive(f, path, archiveCacheKey(f, path, size))
+	case archiveISO:
+		fsys, err = openISOArchive(asReaderAt, size, path)
 	default:
 		fsys, err = openZipArchive(asReaderAt, size, path)
 	}

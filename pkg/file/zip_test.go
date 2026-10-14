@@ -150,6 +150,12 @@ func TestZipFS_Formats(t *testing.T) {
 	rarPath := filepath.Join(dir, "gallery.rar")
 	writeTestRar5(t, rarPath, false)
 
+	jolietPath := filepath.Join(dir, "joliet.iso")
+	writeTestISO(t, jolietPath, testArchiveFiles, isoNamesJoliet, false)
+
+	rockRidgePath := filepath.Join(dir, "rockridge.iso")
+	writeTestISO(t, rockRidgePath, testArchiveFiles, isoNamesRockRidge, false)
+
 	// detection is by content, not extension
 	disguisedPath := filepath.Join(dir, "gallery.cbr")
 	writeTestZip(t, disguisedPath)
@@ -172,6 +178,8 @@ func TestZipFS_Formats(t *testing.T) {
 		{"zip", zipPath},
 		{"7z", filepath.Join("testdata", "gallery.7z")},
 		{"rar", rarPath},
+		{"iso with Joliet names", jolietPath},
+		{"iso with Rock Ridge names", rockRidgePath},
 		{"zip with cbr extension", disguisedPath},
 		{"zip with prepended data", prefixedPath},
 	}
