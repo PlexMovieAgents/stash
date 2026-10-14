@@ -4,7 +4,7 @@ Images are the parts which make up galleries, but you can also have them be scan
 
 1. Group them in a folder together and activate the **Create galleries from folders containing images** option in the library section of your settings. The gallery will get the name of the folder.
 2. Group them in a folder together and create a file in the folder called .forcegallery. The gallery will get the name of the folder.
-3. Group them into a zip, 7z or rar archive together. The gallery will get the name of the archive.
+3. Group them into a zip, 7z or rar archive or an ISO disc image together. The gallery will get the name of the archive.
 4. You can simply create a gallery in stash itself by clicking on **New** in the Galleries tab. 
 
 You can add images to every gallery manually in the gallery detail page. Deleting can be done by selecting the according images in the same view and clicking on the minus next to the edit button.
@@ -14,6 +14,8 @@ For best results, images in zip file should be stored without compression (copy,
 7z and rar archives are also supported. Encrypted archives are not supported.
 
 Solid 7z and rar archives (the default for 7-Zip) compress files together, so an image can only be read after decompressing the images before it. Scanning reads them in order, so this costs little. To view images out of order, stash extracts the solid parts of the archive to the `archives` folder of the cache directory. The cache is limited to 2GB by default, removing the least recently used archives first, and can be changed with the `archive_cache_size_mb` setting in `config.yml` (`0` disables it). Without a cache directory, or for archives larger than the cache, viewing an image decompresses the archive up to that image each time, which can be slow. For the best performance, create archives with solid mode disabled and no compression, for example `7z a -ms=off -mx=0 gallery.7z foldertozip/` or `rar a -s- -m0 gallery.rar foldertozip/`.
+
+ISO disc images are supported too, but `iso` is not in the default gallery extensions, since ISO images often hold videos. Add it to the gallery extensions in the library section of your settings to use them. Images are read directly from the disc image, which is as fast as an uncompressed zip file. Rock Ridge and Joliet file names are supported. Disc images with only a UDF file system, such as Blu-ray discs, are not supported, and their contents are skipped during scanning.
 
 > **⚠️ Note:** AVIF files in ZIP archives are currently unsupported.
 
